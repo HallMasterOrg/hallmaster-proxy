@@ -35,3 +35,10 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 
 /certs
 docker-compose.yml
+
+# Defense-in-depth: never commit private keys or stray certs
+*.pem
+*.key
+*.crt
+proxy/hallmaster-proxy
+.claude

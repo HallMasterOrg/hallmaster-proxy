@@ -2,66 +2,22 @@ package handlers
 
 import (
 	"bufio"
-	"bytes"
-	"compress/zlib"
-	"hallmasterorg/hallmaster-proxy/internals/middlewares"
+	"hallmasterorg/hallmaster-proxy/internals/discord"
+	"hallmasterorg/hallmaster-proxy/internals/tamper"
 	"io"
 	"log"
 	"net"
+	"sync"
 
 	"github.com/gobwas/ws"
 	"github.com/gobwas/ws/wsutil"
 )
-type ZlibDecoder struct {
-    pr *io.PipeReader
-    pw *io.PipeWriter
-    reader io.ReadCloser
-}
 
-func NewZlibDecoder() *ZlibDecoder {
-    pr, pw := io.Pipe()
-    return &ZlibDecoder{
-        pr: pr,
-        pw: pw,
-    }
-}
-func (d *ZlibDecoder) Decode(data []byte) ([]byte, error) {
-    go d.pw.Write(data)
-    if d.reader == nil {
-        var err error
-        d.reader, err = zlib.NewReader(d.pr)
-        if err != nil {
-            return nil, err
-        }
-    }
-    if !bytes.HasSuffix(data, []byte{0x00, 0x00, 0xff, 0xff}) {
-        return nil, nil
-    }
-    return d.readAvailable()
-}
-
-func (d *ZlibDecoder) readAvailable() ([]byte, error) {
-    var result bytes.Buffer
-    buf := make([]byte, 8192)
-    for {
-        n, err := d.reader.Read(buf)
-        result.Write(buf[:n])
-        if n < len(buf) {
-            break
-        }
-        if err != nil {
-            if err == io.EOF || err == io.ErrUnexpectedEOF {
-                break
-            }
-            return nil, err
-        }
-    }
-    return result.Bytes(), nil
-}
-
-// InspectWS proxies WebSocket traffic between client (bot) and server (Discord)
-// with optional zlib decompression and tampering hooks.
-// InspectWS proxies WebSocket traffic with correct zlib-stream handling
+// InspectWS proxies WebSocket traffic between client (bot) and server (Discord).
+// When zlib-stream compression is negotiated, the proxy decodes Discord-side
+// frames *for inspection only* (so the tamperer sees readable JSON) and
+// forwards the original compressed payload onwards — bots that opted into
+// compression expect compressed frames.
 func InspectWS(
 	client net.Conn,
 	clientBr *bufio.Reader,
@@ -69,31 +25,44 @@ func InspectWS(
 	serverBr *bufio.Reader,
 	host string,
 	isCompressed bool,
+	tamperer tamper.Tamperer,
 ) {
-	decoder := NewZlibDecoder()
+	var decoder *discord.ZlibStreamDecoder
+	if isCompressed {
+		decoder = discord.NewZlibStreamDecoder()
+		defer decoder.Close()
+	}
 
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	// bot -> Discord
 	go func() {
+		defer wg.Done()
+		defer server.Close()
 		src := io.MultiReader(clientBr, client)
 		for {
 			frame, err := ws.ReadFrame(src)
 			if err != nil {
-				log.Printf("[WS Bot -> Discord] Read error: %v", err)
+				if err != io.EOF {
+					log.Printf("[WS Bot -> Discord] Read error: %v", err)
+				}
 				return
 			}
 
-			outgoing := make([]byte, len(frame.Payload))
-            copy(outgoing, frame.Payload)
-            if frame.Header.Masked {
-                ws.Cipher(outgoing, frame.Header.Mask, 0)
-            }
+			payload := frame.Payload
+			if frame.Header.Masked {
+				payload = make([]byte, len(frame.Payload))
+				copy(payload, frame.Payload)
+				ws.Cipher(payload, frame.Header.Mask, 0)
+			}
 
-			log.Printf("[WS Bot -> Discord] Op: %v | Payload: %s",
-				frame.Header.OpCode, string(outgoing))
+			log.Printf("[WS Bot -> Discord] Op: %v Len: %d", frame.Header.OpCode, len(payload))
 
-			tampered, err := middlewares.TamperOutgoing(outgoing)
+			tampered, err := tamperer.WSOutgoing(payload)
 			if err != nil {
-				log.Printf("TamperOutgoing error: %v - using original", err)
-				tampered = outgoing
+				log.Printf("WSOutgoing tamper error: %v - using original", err)
+				tampered = payload
 			}
 
 			if err := wsutil.WriteClientMessage(server, frame.Header.OpCode, tampered); err != nil {
@@ -107,41 +76,50 @@ func InspectWS(
 		}
 	}()
 
+	// Discord -> bot
 	go func() {
+		defer wg.Done()
+		defer client.Close()
 		src := io.MultiReader(serverBr, server)
 		for {
 			frame, err := ws.ReadFrame(src)
 			if err != nil {
-				log.Printf("[WS Discord -> Bot] Read error: %v", err)
+				if err != io.EOF {
+					log.Printf("[WS Discord -> Bot] Read error: %v", err)
+				}
 				return
 			}
 
-			log.Printf("[WS Discord -> Bot] Op: %v | Compressed Len: %d", frame.Header.OpCode, len(frame.Payload))
+			log.Printf("[WS Discord -> Bot] Op: %v Len: %d (host %s)", frame.Header.OpCode, len(frame.Payload), host)
 
-			var incoming []byte
-
-			if isCompressed && frame.Header.OpCode == ws.OpBinary {
-				incoming, err = decoder.Decode(frame.Payload)
+			// For compressed streams, hand the tamperer the *decoded* view so
+			// observers see readable JSON, but always forward the original
+			// compressed frame — bots that negotiated compress=zlib-stream
+			// expect compressed bytes. For uncompressed streams the
+			// tamperer's return value IS what gets forwarded, giving it the
+			// option to rewrite.
+			outbound := frame.Payload
+			if decoder != nil && frame.Header.OpCode == ws.OpBinary {
+				tamperView := frame.Payload
+				inspected, err := decoder.Decode(frame.Payload)
 				if err != nil {
-					log.Printf("Zlib decode error: %v - forwarding raw compressed data", err)
-					incoming = frame.Payload
-				} else if incoming == nil {
-					continue
+					log.Printf("Zlib decode error: %v", err)
+				} else if inspected != nil {
+					tamperView = inspected
+				}
+				if _, err := tamperer.WSIncoming(tamperView); err != nil {
+					log.Printf("WSIncoming tamper error: %v", err)
 				}
 			} else {
-				incoming = frame.Payload
+				tampered, err := tamperer.WSIncoming(frame.Payload)
+				if err != nil {
+					log.Printf("WSIncoming tamper error: %v - using original", err)
+				} else {
+					outbound = tampered
+				}
 			}
 
-			log.Printf("[WS Discord -> Bot] %s | Decompressed Len: %d | Payload: %s",
-				host, len(incoming), string(incoming))
-
-			tampered, err := middlewares.TamperIncoming(incoming)
-			if err != nil {
-				log.Printf("TamperIncoming error: %v - using original", err)
-				tampered = incoming
-			}
-
-			if err := wsutil.WriteServerMessage(client, frame.Header.OpCode, tampered); err != nil {
+			if err := wsutil.WriteServerMessage(client, frame.Header.OpCode, outbound); err != nil {
 				log.Printf("[WS Discord -> Bot] Write error: %v", err)
 				return
 			}
@@ -152,6 +130,6 @@ func InspectWS(
 		}
 	}()
 
-	<-make(chan struct{})
+	wg.Wait()
 	log.Printf("[WS] Connection closed for %s", host)
 }

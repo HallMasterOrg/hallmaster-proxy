@@ -9,22 +9,37 @@ import (
 	"crypto/x509/pkix"
 	"encoding/pem"
 	"fmt"
-	"hallmasterorg/hallmaster-proxy/internals/utils"
 	"math/big"
+	"net"
 	"os"
 	"strings"
 	"sync"
 	"time"
+
+	"golang.org/x/sync/singleflight"
 )
+
+// serverNameFromHost strips an optional :port suffix so a hostname can be
+// used as the Common Name of a leaf certificate.
+func serverNameFromHost(hostname string) string {
+	if !strings.Contains(hostname, ":") {
+		return hostname
+	}
+	if host, _, err := net.SplitHostPort(hostname); err == nil {
+		return host
+	}
+	return hostname
+}
+
+const leafCertValidity = 7 * 24 * time.Hour
 
 type MITMProxyCerts struct {
 	caCert *x509.Certificate
 	caKey  *rsa.PrivateKey
 
-	certCache map[string]*tls.Certificate
-	mu        sync.Mutex
+	cache sync.Map // hostname -> *tls.Certificate
+	group singleflight.Group
 }
-
 
 func New(caCertPath string, caKeyPath string) (*MITMProxyCerts, error) {
 	caCert, err := getPublicKey(caCertPath)
@@ -38,29 +53,31 @@ func New(caCertPath string, caKeyPath string) (*MITMProxyCerts, error) {
 	}
 
 	return &MITMProxyCerts{
-		caCert:           caCert,
-		caKey:            caKey,
-		certCache:        make(map[string]*tls.Certificate),
+		caCert: caCert,
+		caKey:  caKey,
 	}, nil
 }
 
 func (p *MITMProxyCerts) GetOrCreateCert(hostname string) (*tls.Certificate, error) {
-	p.mu.Lock()
-	if c, ok := p.certCache[hostname]; ok {
-		p.mu.Unlock()
-		return c, nil
+	if c, ok := p.cache.Load(hostname); ok {
+		return c.(*tls.Certificate), nil
 	}
-	p.mu.Unlock()
 
-	tlsCert, err := p.createCertificate(hostname)
+	v, err, _ := p.group.Do(hostname, func() (any, error) {
+		if c, ok := p.cache.Load(hostname); ok {
+			return c, nil
+		}
+		c, err := p.createCertificate(hostname)
+		if err != nil {
+			return nil, err
+		}
+		p.cache.Store(hostname, c)
+		return c, nil
+	})
 	if err != nil {
 		return nil, err
 	}
-
-	p.mu.Lock()
-	p.certCache[hostname] = tlsCert
-	p.mu.Unlock()
-	return tlsCert, nil
+	return v.(*tls.Certificate), nil
 }
 
 func (c *MITMProxyCerts) createCertificate(hostname string) (*tls.Certificate, error) {
@@ -69,25 +86,33 @@ func (c *MITMProxyCerts) createCertificate(hostname string) (*tls.Certificate, e
 		return nil, err
 	}
 
-	servername := utils.GetServerName(hostname)
+	servername := serverNameFromHost(hostname)
 
-    pubBytes, _ := x509.MarshalPKIXPublicKey(&priv.PublicKey)
-    subjectKeyId := sha1.Sum(pubBytes)
+	pubBytes, err := x509.MarshalPKIXPublicKey(&priv.PublicKey)
+	if err != nil {
+		return nil, fmt.Errorf("marshal public key: %w", err)
+	}
+	subjectKeyId := sha1.Sum(pubBytes)
 
-    serial, _ := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
-    tmpl := &x509.Certificate{
-        SerialNumber: serial,
-        Subject:      pkix.Name{CommonName: servername},
-        NotBefore:    time.Now().Add(-time.Hour),
-        NotAfter:     time.Now().Add(365 * 24 * time.Hour),
-        KeyUsage:     x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
-        ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
-        BasicConstraintsValid: true,
-        IsCA:                  false,
-        DNSNames:             []string{servername},
-        SubjectKeyId:   subjectKeyId[:],
-        AuthorityKeyId: c.caCert.SubjectKeyId,
-    }
+	serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
+	if err != nil {
+		return nil, fmt.Errorf("generate cert serial: %w", err)
+	}
+
+	now := time.Now()
+	tmpl := &x509.Certificate{
+		SerialNumber:          serial,
+		Subject:               pkix.Name{CommonName: servername},
+		NotBefore:             now.Add(-time.Hour),
+		NotAfter:              now.Add(leafCertValidity),
+		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		BasicConstraintsValid: true,
+		IsCA:                  false,
+		DNSNames:              []string{servername},
+		SubjectKeyId:          subjectKeyId[:],
+		AuthorityKeyId:        c.caCert.SubjectKeyId,
+	}
 
 	der, err := x509.CreateCertificate(rand.Reader, tmpl, c.caCert, &priv.PublicKey, c.caKey)
 	if err != nil {
@@ -118,12 +143,7 @@ func getPublicKey(path string) (*x509.Certificate, error) {
 	if block == nil || block.Type != "CERTIFICATE" {
 		return nil, fmt.Errorf("invalid CA cert PEM")
 	}
-	caCert, err := x509.ParseCertificate(block.Bytes)
-	if err != nil {
-		return nil, err
-	}
-
-	return caCert, nil
+	return x509.ParseCertificate(block.Bytes)
 }
 
 func getPrivateKey(path string) (*rsa.PrivateKey, error) {
