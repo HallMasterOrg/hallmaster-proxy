@@ -1,0 +1,10 @@
+.git
+.gitignore
+.env
+.env.*
+*.md
+Dockerfile
+.dockerignore
+docker-compose*.yml
+certs/
+.claude/

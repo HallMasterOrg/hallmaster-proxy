@@ -1,0 +1,21 @@
+linters:
+  enable:
+    - errcheck
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+    - gofmt
+    - goimports
+
+linters-settings:
+  errcheck:
+    check-blank: false
+    exclude-functions:
+      - (net.Conn).Close
+      - (*crypto/tls.Conn).Close
+      - fmt.Fprintf
+      - (net/http.ResponseWriter).Write
+
+issues:
+  exclude-use-default: false

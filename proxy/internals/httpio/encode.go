@@ -1,4 +1,4 @@
-package utils
+package httpio
 
 import (
 	"bytes"
@@ -11,13 +11,16 @@ import (
 	"github.com/andybalholm/brotli"
 )
 
-func EncodeHttpResponse(resp *http.Response) error {
+// Encode normalises `resp.Body` for forwarding to the client: it reads the
+// (already-decoded) body, optionally re-compresses it per the response's
+// Content-Encoding header, and updates Content-Length so the response can
+// be written with a fresh framing.
+func Encode(resp *http.Response) error {
 	if resp == nil || resp.Request == nil || resp.Body == nil {
 		return nil
 	}
 
-	contentType := resp.Header.Get("Content-Type")
-	if isBinary(contentType) {
+	if isBinary(resp.Header.Get("Content-Type")) {
 		return nil
 	}
 
@@ -37,8 +40,8 @@ func EncodeHttpResponse(resp *http.Response) error {
 	encoding := resp.Header.Get("Content-Encoding")
 	var finalBody []byte
 
-	if encoding == "" || encoding=="identity" {
-		finalBody=fullBody
+	if encoding == "" || encoding == "identity" {
+		finalBody = fullBody
 	} else {
 		var compressedBuffer bytes.Buffer
 		var writer io.WriteCloser
@@ -52,14 +55,15 @@ func EncodeHttpResponse(resp *http.Response) error {
 			writer = brotli.NewWriter(&compressedBuffer)
 		}
 		if writer != nil {
-			_, err = writer.Write(fullBody)
-			if err != nil {
+			if _, err = writer.Write(fullBody); err != nil {
 				return err
 			}
-			writer.Close()
-			finalBody=compressedBuffer.Bytes()
+			if err = writer.Close(); err != nil {
+				return err
+			}
+			finalBody = compressedBuffer.Bytes()
 		} else {
-			finalBody=fullBody
+			finalBody = fullBody
 		}
 	}
 

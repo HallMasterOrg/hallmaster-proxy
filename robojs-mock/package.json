@@ -1,0 +1,48 @@
+{
+  "name": "app",
+  "description": "",
+  "version": "1.0.0",
+  "type": "module",
+  "private": true,
+  "keywords": [
+    "api",
+    "bot",
+    "discord",
+    "discord.js",
+    "http",
+    "robo",
+    "robo.js",
+    "server",
+    "typescript",
+    "vite",
+    "web"
+  ],
+  "scripts": {
+    "build": "robo build",
+    "deploy": "robo deploy",
+    "dev": "robox dev",
+    "doctor": "sage doctor",
+    "invite": "robo invite",
+    "lint:style": "prettier --write .",
+    "start": "robo start",
+    "upgrade": "sage upgrade"
+  },
+  "dependencies": {
+    "@robojs/discordjs": "^0.1.0-next.0",
+    "@robojs/mock": "https://pkg.pr.new/Wave-Play/robo.js/@robojs/mock@b04d50c",
+    "@robojs/server": "^0.7.0-next.0",
+    "discord.js": "^14.26.3",
+    "robo.js": "^0.11.0-next.0",
+    "selfsigned": "^5.5.0"
+  },
+  "devDependencies": {
+    "@swc/core": "^1.15.4",
+    "@types/jest": "^29.5.14",
+    "@types/node": "^25.0.2",
+    "jest": "^29.7.0",
+    "prettier": "^3.7.4",
+    "ts-jest": "^29.2.5",
+    "typescript": "^5.9.3",
+    "vite": "^7.2.7"
+  }
+}

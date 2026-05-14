@@ -2,130 +2,117 @@
 
 ## Introduction
 
-`Hallmaster Proxy` is a service that allows for HTTP/S requests and responses
-inspections.
+`Hallmaster Proxy` is a service that intercepts HTTP/S requests and WebSocket
+traffic so they can be inspected, logged, tampered with for tests, and
+analysed for metrics.
 
-It is meant to be used in a Docker container network, where all the
-`hallmaster-runner` containers traffic on port `80` for HTTP and `443` for HTTPS
-is being redirected.
+It is meant to be used inside a Docker network alongside `hallmaster-runner`
+containers — the runner image (built and published from a separate repository)
+installs `iptables` rules that redirect port 80 / 443 traffic to this proxy.
 
-The goal is to provide a tool that is able to read through all requests to
-understand their purpose, especially those at destination of the Discord API.
+The proxy targets Discord's API in particular: it terminates TLS using a
+self-signed CA, hands the bot a freshly-minted certificate signed by that CA,
+forwards the request upstream, and observes both directions.
 
-We are targetting Discord's API so that we can extract different metrics from
-the requests to build a solid metric and logs database, but also allowing for
-other opportunities, such as caching requests to avoid rate limits, and so more.
+## Repository layout
+
+```
+/                          Root CA generation, top-level compose example
+├── certificate-manager.sh OpenSSL wrapper to produce the Root CA
+├── docker-compose.example.yml
+└── proxy/                 Go proxy source + Dockerfile
+    └── internals/
+        ├── certs/         CA loading + on-the-fly leaf signing (singleflight cache)
+        ├── config/        Env-var-driven configuration
+        ├── discord/       Discord-specific bits (zlib-stream decoder)
+        ├── dnsbypass/     External DNS resolver (Resolver interface, mockable)
+        ├── handlers/      HTTPS + WebSocket forwarding handlers
+        ├── healthz/       /healthz endpoint for container healthchecks
+        ├── httpio/        Generic HTTP request/response encode/decode helpers
+        ├── proxylog/      Request/response logging
+        └── tamper/        Tamperer interface — the test/feature seam
+```
 
 ## Usage
 
-### Root Certificate Authority (Root CA)
+### 1. Generate the Root Certificate Authority
 
-For the proxy to read through HTTPS request without raising a 'self-signed
-certificate' error from the HTTP client, the `hallmaster-runner` container,
-which MUST be used as a base for the Discord bot container, includes a Root CA
-that can be generated using the `certificate-manager.sh` shell script.
+The Root CA's public certificate is mounted into every bot container so it
+can validate the leaf certs the proxy presents. The private key is mounted
+into the proxy itself.
 
-It will create a `./certs` folder if it does not already exist, and generate a
-new pair of public and private keys, used in TLS context, where the public key
-is the Root CA being mounted on the `hallmaster-runner` container at build time,
-and where the private key is used by the proxy to sign a certificate created by
-the proxy on-the-fly when an HTTPS request is made.
-
-The `./certs` folder will also output a `openssl.conf` file that contains the
-configuration used by `openssl` during the key pair generation. Although this
-may be useful for debugging, you can safely remove it, or simply ignore it.
-
-Be careful, if you already have files in the `./certs` folder and you still run
-the script, all the files will be overwritten without warning.
-
-### Building the Hallmaster Proxy
-
-As previously said in the introduction, the Hallmaster Proxy service is meant to
-be used in a containerized environment. In that reguard, there is a `Dockerfile`
-at the root of this project that contains the Docker build recipe. To make it
-easier, there is also a `docker-compose.yml` file that helps during the build
-stage.
-
-To start the build process, type :
 ```bash
-docker compose build hallmaster-proxy
+./certificate-manager.sh
 ```
 
-Please note that this assumes you have the Docker Engine and Docker Compose
-installed and available on your machine.
+The script creates `./certs/hallmaster-rootca.pem` (private key) and
+`./certs/hallmaster-rootca.crt` (public cert). Re-running refuses to
+overwrite unless you pass `--force`.
 
-Then, you can start the proxy service using this command :
+### 2. Configure the compose file
+
+The repo ships a `docker-compose.example.yml`; copy it to
+`docker-compose.yml` (which is git-ignored), uncomment the example bot
+services, and point their `build:` / `image:` at your own bot images.
+
 ```bash
-docker compose up hallmaster-proxy -d # detach the process from the shell
+cp docker-compose.example.yml docker-compose.yml
 ```
 
-### The Hallmaster Runner
+### 3. Run the proxy
 
-The Hallmaster Runner creates an environment dedicated for hosting Discord bots
-on Hallmaster clusters.
-
-First, it copies the Root CA public key to the dedicated `ca-certificates` path
-so that when the container's traffic gets routed to the proxy, the HTTP client
-already trusts the returned certificate, thus not raising a 'self-signed
-certificate' error.
-
-Then it sets up `iptables` rules to redirect all the outgoing traffic from port
-`80` (HTTP) and `443` (HTTPS) to the Hallmaster Proxy. Note that all derived
-images such the one presented in the `./bots` folder as an example inherits of
-that behavior. The traffic redirection only happens at runtime, meaning that you
-can still intall your bot's dependencies just fine at build time.
-
-### Usecase
-
-To make sure everything is setup, we also provide a simple Discord bot example,
-written in TypeScript, using Bun. Although you do not need to understand the
-code, you still have to get your hands on a Discord bot token that you own to
-test it.
-
-At the root of the project, create a new `.env` file and include the following
-environment variable declaration :
 ```bash
-DISCORD_BOT_TOKEN="<your discord bot token here>"
+docker compose up --build hallmaster-proxy -d
 ```
 
-Once done, you can build the Docker image of the `discord-bot` service using the
-following command :
-```bash
-docker compose build discord-bot
-```
+The healthcheck (`GET /healthz` on port `PROXY_HEALTH_PORT`) flips the
+container to `healthy` within ~30 seconds. After that you can `compose up`
+the bot services.
 
-This will also build the Docker image of the `hallmaster-runner` if it is not
-already built.
+## Environment variables
 
-Once the image is built, you can create a container from it using the following
-command :
-```bash
-docker compose up discord-bot -d
-```
+| Name | Default | Purpose |
+| --- | --- | --- |
+| `PROXY_HOSTNAME` | system hostname | DNS name the bot uses to reach the proxy. Used to detect relay requests. |
+| `PROXY_PORT` | `8080` | TCP port the proxy listens on for client traffic. |
+| `PROXY_HEALTH_PORT` | `8081` | Port the `/healthz` endpoint binds (loopback only). |
+| `PROXY_SSL_CA_CERT_PATH` | — (required) | Path to the Root CA public certificate inside the container. |
+| `PROXY_SSL_CA_KEY_PATH` | — (required) | Path to the Root CA private key inside the container. |
+| `PROXY_DNS_SERVER` | `8.8.8.8:53` | External DNS resolver used to bypass the in-container DNS that resolves Discord hostnames to the proxy. |
 
-You should see your Discord bot up and running, with some logs about the shards.
+## The Hallmaster Runner
 
-## 'Self-signed certificate' error
+The Hallmaster Runner is a base image (maintained in a separate repository)
+for hosting Discord bots:
 
-Although we did our best to minimize the risk, there is still a chance that
-depending on the stack you are using, or how you configured it, your bot is
-unable to trust the Root CA from the proxy.
+1. It copies the Root CA public cert into `/usr/local/share/ca-certificates/`
+   so the system trust store accepts the leaf certs the proxy issues.
+2. It installs `iptables` rules at runtime that redirect outgoing traffic on
+   ports 80 / 443 to the `hallmaster-proxy` container.
 
-Effectively, even if the Root CA is mounted on the container, some technologies
-such as Node and Bun decide not to trust non-default certificates. A workaround
-for those two exists, which consists of an environment variable declaration that
-you can find in the `docker-compose.yml`, which is `NODE_EXTRA_CA_CERTS`. This
-variable points to the mounted Root CA path.
+Bot containers should inherit from the Hallmaster Runner image, but the
+runner is not part of this repository.
 
-We are aware of that issue for Node and Bun, but it is possible that the stack
-you are using requires a different configuration to actually trust the Root CA.
-You can add an environment variable for that.
+## Self-signed certificate errors
 
-Another workaround we are willing to implement is to use an environment variable
-to override the default Discord API URL so that it will reach to our own API. In
-that regard, we will still be able to read through the requests and responses to
-provide metrics and logs, but at the same time, returning a valid TLS response
-that is not perceived as 'self-signed' by the client.
+Although the Root CA is mounted into bot containers, some language runtimes
+do not trust non-default CAs out of the box and need an extra hint:
 
-NOTE: this last paragraph yapping may be wrong. Perhaps the solution is just to
-use LetsEncrypt to generate the Root CA, as it is popular and widely trusted.
+| Runtime | Variable |
+| --- | --- |
+| Node.js / Bun | `NODE_EXTRA_CA_CERTS` |
+| Python (`requests`) | `REQUESTS_CA_BUNDLE` |
+| OpenSSL (most things) | `SSL_CERT_FILE` |
+| Go | reads the system store, usually OK after `update-ca-certificates` |
+| Java | requires `keytool -import` into the JVM truststore |
+
+The example compose snippets show the Node and Python knobs. For new
+runtimes, set whichever variable points at the mounted Root CA path.
+
+## Running tests
+
+(placeholder — the integration test suite hooks into the `Tamperer`
+interface defined in `proxy/internals/tamper/`. Implement a custom
+`Tamperer` in your test process, pass it to `internals.NewMITMProxy` in
+place of `tamper.Nop{}`, and exercise the proxy from a real or simulated
+bot.)

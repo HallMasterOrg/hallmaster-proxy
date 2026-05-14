@@ -6,53 +6,67 @@ services:
     container_name: hallmaster-proxy
     restart: "no"
     environment:
-      PROXY_HTTP_PORT: 443
+      PROXY_HOSTNAME: hallmaster-proxy
+      PROXY_PORT: 443
+      PROXY_HEALTH_PORT: 8081
       PROXY_SSL_CA_CERT_PATH: "/app/cert/proxy-ca.crt"
       PROXY_SSL_CA_KEY_PATH: "/app/cert/proxy-ca.pem"
+      PROXY_DNS_SERVER: 8.8.8.8:53
     volumes:
       - ./certs/hallmaster-rootca.crt:/app/cert/proxy-ca.crt:ro
       - ./certs/hallmaster-rootca.pem:/app/cert/proxy-ca.pem:ro
     networks:
       hallmaster-proxy-net:
         aliases:
+          # DNS aliases trick bot containers into resolving Discord hostnames
+          # to the proxy. The Hallmaster Runner image additionally installs
+          # iptables rules so plain-IP traffic is redirected to the proxy too.
           - discord.com
           - discord.gg
           - gateway.discord.gg
     healthcheck:
-      test: ["CMD", "ping", "127.0.0.1:$$PROXY_HTTP_PORT"]
-      interval: 1m30s
-      timeout: 30s
-      retries: 5
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:8081/healthz"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
 
-  discordjs-bot:
-    depends_on:
-      - hallmaster-proxy
-    image: <remote>/hallmaster/discordjs-bot:latest
-    env_file:
-      - .env
-    environment:
-      NODE_EXTRA_CA_CERTS: /usr/local/share/ca-certificates/hallmaster-root-ca.crt
-      NODE_USE_ENV_PROXY: "1"
-    restart: "no"
-    networks:
-      - hallmaster-proxy-net
-    volumes:
-      - ./certs/hallmaster-rootca.crt:/usr/local/share/ca-certificates/hallmaster-root-ca.crt:ro
-
-  discordpy-bot:
-    depends_on:
-      - hallmaster-proxy
-    image: <remote>/hallmaster/discordpy-bot:latest
-    env_file:
-      - .env
-    environment:
-      SSL_CERT_FILE: /usr/local/share/ca-certificates/hallmaster-root-ca.crt
-      REQUESTS_CA_BUNDLE: /usr/local/share/ca-certificates/hallmaster-root-ca.crt
-    restart: "no"
-    networks:
-      - hallmaster-proxy-net
-    volumes:
-      - ./certs/hallmaster-rootca.crt:/usr/local/share/ca-certificates/hallmaster-root-ca.crt:ro
+  # ---------------------------------------------------------------------------
+  # Example bot services. Replace `build:` / `image:` with your own bot image —
+  # the placeholders below will NOT pull. The important bits are:
+  #   - depends_on: hallmaster-proxy
+  #   - the same network as the proxy
+  #   - the Root CA mounted at the path your runtime trusts (see env vars)
+  # ---------------------------------------------------------------------------
+  # discordjs-bot:
+  #   depends_on:
+  #     - hallmaster-proxy
+  #   build: ./bots/discordjs
+  #   env_file:
+  #     - .env
+  #   environment:
+  #     NODE_EXTRA_CA_CERTS: /usr/local/share/ca-certificates/hallmaster-root-ca.crt
+  #     NODE_USE_ENV_PROXY: "1"
+  #   restart: "no"
+  #   networks:
+  #     - hallmaster-proxy-net
+  #   volumes:
+  #     - ./certs/hallmaster-rootca.crt:/usr/local/share/ca-certificates/hallmaster-root-ca.crt:ro
+  #
+  # discordpy-bot:
+  #   depends_on:
+  #     - hallmaster-proxy
+  #   build: ./bots/discordpy
+  #   env_file:
+  #     - .env
+  #   environment:
+  #     SSL_CERT_FILE: /usr/local/share/ca-certificates/hallmaster-root-ca.crt
+  #     REQUESTS_CA_BUNDLE: /usr/local/share/ca-certificates/hallmaster-root-ca.crt
+  #   restart: "no"
+  #   networks:
+  #     - hallmaster-proxy-net
+  #   volumes:
+  #     - ./certs/hallmaster-rootca.crt:/usr/local/share/ca-certificates/hallmaster-root-ca.crt:ro
 
 networks:
   hallmaster-proxy-net:

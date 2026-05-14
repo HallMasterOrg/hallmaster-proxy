@@ -1,0 +1,71 @@
+services:
+  hallmaster-robojs-mock:
+    image: hallmaster-robojs-mock
+    build:
+      context: ./robojs-mock
+      dockerfile: Dockerfile
+    ports:
+      - "3000:3000"
+    networks:
+      - hallmaster-proxy-net
+    environment:
+      - NODE_ENV=production
+      - NODE_OPTIONS=--enable-source-maps
+      - DISCORD_TOKEN=""
+    volumes:
+      - flashcore-data:/app/.robo/flashcore
+
+  hallmaster-proxy:
+    depends_on:
+      - hallmaster-robojs-mock
+    build:
+      context: proxy/
+      dockerfile: Dockerfile
+    container_name: hallmaster-proxy
+    restart: "no"
+    environment:
+      PROXY_HOSTNAME: hallmaster-proxy
+      PROXY_PORT: 443
+      PROXY_HEALTH_PORT: 8081
+      PROXY_SSL_CA_CERT_PATH: "/app/cert/proxy-ca.crt"
+      PROXY_SSL_CA_KEY_PATH: "/app/cert/proxy-ca.pem"
+      PROXY_DNS_SERVER: 8.8.8.8:53
+      TEST_ENV: true
+    volumes:
+      - ./certs/hallmaster-rootca.crt:/app/cert/proxy-ca.crt:ro
+      - ./certs/hallmaster-rootca.pem:/app/cert/proxy-ca.pem:ro
+    networks:
+      hallmaster-proxy-net:
+        aliases:
+          - discord.com
+          - discord.gg
+          - gateway.discord.gg
+    healthcheck:
+      test: [ "CMD", "ping", "127.0.0.1:$$PROXY_HTTP_PORT" ]
+      interval: 1m30s
+      timeout: 30s
+      retries: 5
+
+  discord-bot:
+    depends_on:
+      - hallmaster-proxy
+    image: testing-bot
+    build:
+      context: ./testing-bot
+      dockerfile: Dockerfile
+    env_file:
+      - .env.test
+    environment:
+      NODE_EXTRA_CA_CERTS: /usr/local/share/ca-certificates/hallmaster-root-ca.crt
+      NODE_USE_ENV_PROXY: "1"
+    restart: "no"
+    networks:
+      - hallmaster-proxy-net
+    volumes:
+      - ./certs/hallmaster-rootca.crt:/usr/local/share/ca-certificates/hallmaster-root-ca.crt:ro
+
+networks:
+  hallmaster-proxy-net:
+
+volumes:
+  flashcore-data:

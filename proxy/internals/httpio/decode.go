@@ -1,4 +1,4 @@
-package utils
+package httpio
 
 import (
 	"bytes"
@@ -6,23 +6,25 @@ import (
 	"compress/zlib"
 	"io"
 	"net/http"
-	"strings"
 
 	"github.com/andybalholm/brotli"
 )
 
-func DecodeHttpResponse(resp *http.Response) (string, error) {
+// Decode reads `resp.Body`, replaces it with an equivalent in-memory reader,
+// and returns the decompressed body as a string for logging and inspection.
+// It strips Content-Encoding from the response header so subsequent writers
+// see the body as identity-encoded.
+func Decode(resp *http.Response) (string, error) {
 	if resp == nil || resp.Request == nil {
 		return "<empty>", nil
 	}
 
-	contentType := resp.Header.Get("Content-Type")
-	if isBinary(contentType) {
+	if isBinary(resp.Header.Get("Content-Type")) {
 		return "<blob media>", nil
 	}
 
-	if resp.Body ==nil{
-		return "<empty>",nil
+	if resp.Body == nil {
+		return "<empty>", nil
 	}
 
 	fullBody, err := io.ReadAll(resp.Body)
@@ -55,10 +57,6 @@ func DecodeHttpResponse(resp *http.Response) (string, error) {
 		return "", decodeErr
 	}
 
-	if reader == nil {
-		return "<unable to decode>", nil
-	}
-
 	decompressed, err := io.ReadAll(reader)
 	if err != nil {
 		return "", err
@@ -69,15 +67,4 @@ func DecodeHttpResponse(resp *http.Response) (string, error) {
 	resp.Header.Del("Content-Encoding")
 
 	return string(decompressed), nil
-}
-
-func isBinary(contentType string) bool {
-	ct := strings.ToLower(contentType)
-	binaryTypes := []string{"image/", "video/", "audio/", "application/octet-stream", "application/zip", "font/"}
-	for _, t := range binaryTypes {
-		if strings.Contains(ct, t) {
-			return true
-		}
-	}
-	return false
 }
