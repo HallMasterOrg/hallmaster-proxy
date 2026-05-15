@@ -9,9 +9,9 @@ import (
 
 var zlibSyncFlush = []byte{0x00, 0x00, 0xff, 0xff}
 
-// IsZlibFlush reports whether `data` ends with the Z_SYNC_FLUSH marker that
+// isZlibFlush reports whether `data` ends with the Z_SYNC_FLUSH marker that
 // terminates a Discord zlib-stream gateway message.
-func IsZlibFlush(data []byte) bool {
+func isZlibFlush(data []byte) bool {
 	return bytes.HasSuffix(data, zlibSyncFlush)
 }
 
@@ -73,7 +73,7 @@ func (d *ZlibStreamDecoder) Decode(data []byte) ([]byte, error) {
 		d.reader = r
 	}
 
-	if !IsZlibFlush(data) {
+	if !isZlibFlush(data) {
 		return nil, <-writeDone
 	}
 
