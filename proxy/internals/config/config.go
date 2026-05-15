@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"strings"
 	"time"
 )
 
@@ -34,6 +35,15 @@ type Config struct {
 	// hostnames to the proxy itself).
 	DNSServer  string
 	DNSTimeout time.Duration
+
+	// LogBodies controls whether the default Logging tamperer includes
+	// full HTTP request / response bodies and WS frame payloads in its
+	// structured log lines. Defaults to true — the proxy is a developer
+	// inspection tool, so full visibility is the point. Operators on
+	// shared environments can opt out via PROXY_LOG_BODIES=false to keep
+	// payload bytes out of log streams while still seeing traffic
+	// volume (a `body_len` attribute is always logged).
+	LogBodies bool
 }
 
 // Load reads the proxy's configuration from environment variables and falls
@@ -71,7 +81,22 @@ func Load() (*Config, error) {
 		UpstreamDialTimeout: 10 * time.Second,
 		DNSServer:           getenvDefault("PROXY_DNS_SERVER", "8.8.8.8:53"),
 		DNSTimeout:          5 * time.Second,
+		LogBodies:           getenvBoolDefault("PROXY_LOG_BODIES", true),
 	}, nil
+}
+
+// getenvBoolDefault returns the boolean value of `key` if it is set to one
+// of "1", "true", "yes", "on" (case-insensitive); the inverse strings turn
+// it off. Anything else (or unset) returns `def`.
+func getenvBoolDefault(key string, def bool) bool {
+	switch strings.ToLower(os.Getenv(key)) {
+	case "1", "true", "yes", "on":
+		return true
+	case "0", "false", "no", "off":
+		return false
+	default:
+		return def
+	}
 }
 
 func getenvDefault(key, def string) string {

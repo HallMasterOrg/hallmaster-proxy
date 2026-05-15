@@ -10,32 +10,36 @@ import (
 	"github.com/andybalholm/brotli"
 )
 
-// Decode reads `resp.Body`, replaces it with an equivalent in-memory reader,
-// and returns the decompressed body as a string for logging and inspection.
-// It strips Content-Encoding from the response header so subsequent writers
-// see the body as identity-encoded.
-func Decode(resp *http.Response) (string, error) {
-	if resp == nil || resp.Request == nil {
-		return "<empty>", nil
+// DecodeBody reads `resp.Body`, rewinds it (so downstream readers still see
+// the original bytes), and returns the decompressed payload per the
+// response's Content-Encoding header.
+//
+// Unlike a tampering-style decode, DecodeBody does NOT mutate `resp.Header`:
+// `Content-Encoding` stays put so a subsequent Encode() can re-frame the
+// response with the same on-the-wire encoding.
+//
+// Returns (nil, nil) when there is nothing useful to decode: nil/missing
+// body, binary content type, or empty payload. Callers should treat nil as
+// "no readable body" and fall back to whatever default makes sense
+// (e.g. "<empty>" / "<blob media>" in log lines).
+func DecodeBody(resp *http.Response) ([]byte, error) {
+	if resp == nil || resp.Request == nil || resp.Body == nil {
+		return nil, nil
 	}
 
 	if isBinary(resp.Header.Get("Content-Type")) {
-		return "<blob media>", nil
-	}
-
-	if resp.Body == nil {
-		return "<empty>", nil
+		return nil, nil
 	}
 
 	fullBody, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 
 	resp.Body = io.NopCloser(bytes.NewReader(fullBody))
 
 	if len(fullBody) == 0 {
-		return "<empty>", nil
+		return nil, nil
 	}
 
 	encoding := resp.Header.Get("Content-Encoding")
@@ -50,21 +54,18 @@ func Decode(resp *http.Response) (string, error) {
 	case "br":
 		reader = io.NopCloser(brotli.NewReader(bytes.NewReader(fullBody)))
 	default:
-		return string(fullBody), nil
+		return fullBody, nil
 	}
 
 	if decodeErr != nil {
-		return "", decodeErr
+		return nil, decodeErr
 	}
 
 	decompressed, err := io.ReadAll(reader)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	reader.Close()
 
-	resp.Body = io.NopCloser(bytes.NewReader(decompressed))
-	resp.Header.Del("Content-Encoding")
-
-	return string(decompressed), nil
+	return decompressed, nil
 }

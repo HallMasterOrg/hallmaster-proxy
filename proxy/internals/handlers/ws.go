@@ -5,7 +5,7 @@ import (
 	"hallmasterorg/hallmaster-proxy/internals/discord"
 	"hallmasterorg/hallmaster-proxy/internals/tamper"
 	"io"
-	"log"
+	"log/slog"
 	"net"
 	"sync"
 
@@ -19,6 +19,7 @@ import (
 // forwards the original compressed payload onwards — bots that opted into
 // compression expect compressed frames.
 func InspectWS(
+	logger *slog.Logger,
 	client net.Conn,
 	clientBr *bufio.Reader,
 	server net.Conn,
@@ -45,7 +46,7 @@ func InspectWS(
 			frame, err := ws.ReadFrame(src)
 			if err != nil {
 				if err != io.EOF {
-					log.Printf("[WS Bot -> Discord] Read error: %v", err)
+					logger.Warn("ws read", "dir", "bot->discord", "err", err)
 				}
 				return
 			}
@@ -57,16 +58,16 @@ func InspectWS(
 				ws.Cipher(payload, frame.Header.Mask, 0)
 			}
 
-			log.Printf("[WS Bot -> Discord] Op: %v Len: %d", frame.Header.OpCode, len(payload))
+			logger.Debug("ws frame", "dir", "bot->discord", "opcode", frame.Header.OpCode, "len", len(payload))
 
 			tampered, err := tamperer.WSOutgoing(payload)
 			if err != nil {
-				log.Printf("WSOutgoing tamper error: %v - using original", err)
+				logger.Warn("tamper ws outgoing", "err", err)
 				tampered = payload
 			}
 
 			if err := wsutil.WriteClientMessage(server, frame.Header.OpCode, tampered); err != nil {
-				log.Printf("[WS Bot -> Discord] Write error: %v", err)
+				logger.Error("ws write", "dir", "bot->discord", "err", err)
 				return
 			}
 
@@ -85,12 +86,12 @@ func InspectWS(
 			frame, err := ws.ReadFrame(src)
 			if err != nil {
 				if err != io.EOF {
-					log.Printf("[WS Discord -> Bot] Read error: %v", err)
+					logger.Warn("ws read", "dir", "discord->bot", "err", err)
 				}
 				return
 			}
 
-			log.Printf("[WS Discord -> Bot] Op: %v Len: %d (host %s)", frame.Header.OpCode, len(frame.Payload), host)
+			logger.Debug("ws frame", "dir", "discord->bot", "opcode", frame.Header.OpCode, "len", len(frame.Payload), "host", host)
 
 			// For compressed streams, hand the tamperer the *decoded* view so
 			// observers see readable JSON, but always forward the original
@@ -103,24 +104,24 @@ func InspectWS(
 				tamperView := frame.Payload
 				inspected, err := decoder.Decode(frame.Payload)
 				if err != nil {
-					log.Printf("Zlib decode error: %v", err)
+					logger.Warn("zlib decode", "err", err)
 				} else if inspected != nil {
 					tamperView = inspected
 				}
 				if _, err := tamperer.WSIncoming(tamperView); err != nil {
-					log.Printf("WSIncoming tamper error: %v", err)
+					logger.Warn("tamper ws incoming", "err", err)
 				}
 			} else {
 				tampered, err := tamperer.WSIncoming(frame.Payload)
 				if err != nil {
-					log.Printf("WSIncoming tamper error: %v - using original", err)
+					logger.Warn("tamper ws incoming", "err", err)
 				} else {
 					outbound = tampered
 				}
 			}
 
 			if err := wsutil.WriteServerMessage(client, frame.Header.OpCode, outbound); err != nil {
-				log.Printf("[WS Discord -> Bot] Write error: %v", err)
+				logger.Error("ws write", "dir", "discord->bot", "err", err)
 				return
 			}
 
@@ -131,5 +132,5 @@ func InspectWS(
 	}()
 
 	wg.Wait()
-	log.Printf("[WS] Connection closed for %s", host)
+	logger.Info("ws connection closed", "host", host)
 }

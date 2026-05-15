@@ -12,6 +12,13 @@ import (
 // error causes the proxy to log a warning and fall back to the original
 // payload — tamperers are an enhancement, not a critical path.
 //
+// Response receives the decoded body bytes as a separate argument so the
+// handler is free to feed observers a readable payload without altering the
+// response's Content-Encoding. `decodedBody` is nil when the response has no
+// body, the content type is binary, or decoding failed; in that case
+// tamperers that need bytes should fall back to reading `resp.Body`
+// themselves (and rewind it).
+//
 // WSIncoming receives the *decoded* payload when the gateway is using
 // compress=zlib-stream — so tamperers see readable JSON instead of raw
 // deflate bytes. For compressed connections the proxy always forwards the
@@ -20,7 +27,7 @@ import (
 // tamperer's return value is what gets forwarded.
 type Tamperer interface {
 	Request(req *http.Request) (*http.Request, error)
-	Response(req *http.Request, resp *http.Response) (*http.Response, error)
+	Response(req *http.Request, resp *http.Response, decodedBody []byte) (*http.Response, error)
 	WSIncoming(payload []byte) ([]byte, error)
 	WSOutgoing(payload []byte) ([]byte, error)
 }
@@ -32,7 +39,7 @@ func (Nop) Request(req *http.Request) (*http.Request, error) {
 	return req, nil
 }
 
-func (Nop) Response(_ *http.Request, resp *http.Response) (*http.Response, error) {
+func (Nop) Response(_ *http.Request, resp *http.Response, _ []byte) (*http.Response, error) {
 	return resp, nil
 }
 

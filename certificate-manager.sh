@@ -44,6 +44,7 @@ generate_root_certificate_authority() {
     OPENSSL_CONFIG="$3"
 
     openssl genrsa -out "$ROOT_CA_PRIVATE_KEY" 4096
+    chmod 0600 "$ROOT_CA_PRIVATE_KEY"
 
     openssl req -x509 -new -nodes -key "$ROOT_CA_PRIVATE_KEY" \
         -sha256 -days "$DAYS_VALID" -out "$ROOT_CA_PUBLIC_CERT" \
