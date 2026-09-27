@@ -1,188 +1,169 @@
 # CLAUDE.md
 
-Operator notes for working on this repo. Read [docs/](docs/) for the full
-story; this file is the "things I wish I had known before touching the code"
-shortlist.
+## What this project is
 
-## What this is
+The data plane of [Hallmaster](https://github.com/hallmasterorg/hallmaster),
+a hosting platform for Discord bots. It's a Go man-in-the-middle proxy that
+runs on the same Docker network as the bot shard containers and sees **all**
+of their Discord traffic (REST over HTTPS, and the gateway over WSS)
+without the bot authors having to instrument anything.
 
-A Go MITM proxy for Discord bot traffic, deployed as a Docker container.
-Bots join the same Docker network, DNS aliases (`discord.com`, `discord.gg`,
-`gateway.discord.gg`) point at the proxy, the proxy terminates TLS with
-leaf certs signed by a self-managed Root CA, then forwards upstream.
+```
+bot shard ──TLS──▶ proxy ──TLS──▶ real Discord
+          ◀──────  (decrypt, decompress, read)  ◀──────
+```
 
-It is the data plane for [Hallmaster](https://github.com/hallmasterorg/hallmaster)
-— a hosting platform for Discord bots that wants to log/monitor/shard
-without making bot authors instrument anything.
+Both directions go through the same steps:
+
+1. **Catch.** Docker DNS aliases (`discord.com`, `discord.gg`,
+   `gateway.discord.gg`) resolve to the proxy. The Hallmaster Runner base
+   image (a separate repo) also adds `iptables` redirects and installs our
+   Root CA in the bot's trust store.
+2. **Decrypt.** The proxy terminates TLS with a leaf cert for the requested
+   host, signed on the fly by a self-managed Root CA
+   (`certificate-manager.sh`).
+3. **Decompress + read.** HTTP bodies (gzip/deflate/brotli) and gateway
+   frames (`zlib-stream`) are decoded and handed to the `Tamperer`.
+   Today it only logs; the plan is to ship to the analytics backend.
+4. **Forward.** The proxy can't resolve `discord.com` through Docker DNS,
+   because that name points back to the proxy itself. It resolves real
+   Discord IPs through an external DNS server (`PROXY_DNS_SERVER`), dials
+   the IP, and keeps `ServerName: <original host>` so SNI and certificate
+   validation against Discord still work.
+5. **Return path.** Responses and gateway frames from Discord go through
+   the same decrypt → decompress → read steps before reaching the shard.
+
+### Where it's going
+
+The proxy is the foundation for features Discord's API doesn't offer:
+
+- **Zero-downtime rescaling.** Resharding without losing or duplicating
+  gateway events. It needs a cache/state layer in the proxy that
+  understands sessions, sequence numbers and resume.
+- **Telemetry forwarding.** Logs, errors, rate limits and traffic stats go
+  to the Hallmaster backend (a separate repo). It stores them in a DB and
+  shows them on a dashboard.
+
+That direction implies some rules for code written now:
+
+- **The bot sees exactly what Discord sent**, unless we change it on
+  purpose. Pass-through fidelity comes first; observing traffic is a side
+  effect.
+- **Observation must never slow or break forwarding.** A slow or failing
+  analytics sink must not stall a gateway pump or drop a frame. Anything
+  that ships data off-box has to be async and bounded, and should shed its
+  own load rather than the bot's traffic.
+- **The gateway path is the critical path.** Event loss or duplication is
+  what the rescaling feature exists to prevent, so the proxy must not add
+  either.
 
 ## Where to read what
 
-- Project pitch + quick start: [README.md](README.md)
-- Setup, env vars, dev vs prod workflow: [docs/setup.md](docs/setup.md)
-- Network topology + request lifecycle: [docs/architecture.md](docs/architecture.md)
+README points, `docs/` explains. Don't duplicate content between them.
+
+- Setup, env vars, dev vs prod: [docs/setup.md](docs/setup.md)
+- Topology + request lifecycle: [docs/architecture.md](docs/architecture.md)
 - Feature inventory: [docs/features.md](docs/features.md)
-- Caveats / foot-guns / per-runtime trust-store table: [docs/known-issues.md](docs/known-issues.md)
+- Foot-guns, runtime trust-store table, open bugs: [docs/known-issues.md](docs/known-issues.md)
 
-## Repo layout
+## Code map (`proxy/`)
 
-```
-/
-├── certificate-manager.sh         POSIX-sh wrapper around OpenSSL to mint the Root CA
-├── docker-compose.example.yml     Template; copy to docker-compose.yml (git-ignored)
-├── docker-compose.yml             Local instance (git-ignored)
-├── docker-compose.test.yml        Test instance (uses robojs-mock + testing-bot)
-├── certs/                         Generated CA (git-ignored; *.pem private, *.crt public)
-├── docs/                          Long-form docs (see above)
-├── robojs-mock/                   IGNORE for now — moves to its own branch
-├── testing-bot/                   IGNORE for now — moves to its own branch
-└── proxy/                         The Go proxy
-    ├── main.go                    Wires Config -> Certs -> Resolver -> Tamperer -> MITMProxy
-    ├── Dockerfile                 Two-stage build, alpine base, ~15-20 MB final image
-    ├── .golangci.yml              Active linters: errcheck/govet/ineffassign/staticcheck/unused/gofmt/goimports
-    └── internals/
-        ├── mitm.go                Listen / Serve / Handshake; HandlerDeps + Handshaker
-        ├── certs/certs.go         Root CA load + on-the-fly leaf signing (sync.Map + singleflight + renewal)
-        ├── config/config.go       Flat Config struct, env-driven, Load() builds it
-        ├── discord/wscompress.go  ZlibStreamDecoder for gateway compress=zlib-stream
-        ├── dnsbypass/resolver.go  Resolver interface (mockable) + ExternalResolver
-        ├── handlers/https.go      Per-request HTTPS forwarding + isDiscordHost + Tamperer.Request/Response
-        ├── handlers/ws.go         InspectWS: bidirectional WS pump + Tamperer.WSIncoming/WSOutgoing
-        ├── healthz/healthz.go     Loopback /healthz, 200 if ready() else 503
-        ├── httpio/                gzip/deflate/brotli DecodeBody + framing-normalising Encode
-        ├── internaltest/          Test-only helpers (WriteTestCA, IssueLeaf) — never imported from production
-        └── tamper/                Tamperer interface + Nop (silent) + Logging (verbose default)
-```
+| Path | Role |
+|---|---|
+| `main.go` | Wires Config → Certs → Resolver → Tamperer → MITMProxy (`//go:build !stress`) |
+| `main_stress.go` | `-tags stress` hook: upstream → robojs-mock, optional `Nop` Tamperer, loopback pprof |
+| `internals/mitm.go` | Listen/Serve/Handshake, `HandlerDeps`, `Handshaker` |
+| `internals/handlers/https.go` | Per-request HTTPS forwarding, `isDiscordHost` |
+| `internals/handlers/ws.go` | `InspectWS`: bidirectional gateway pump |
+| `internals/certs/` | Root CA load, leaf signing (sync.Map + singleflight + renewal) |
+| `internals/dnsbypass/` | `Resolver` interface + external DNS resolver |
+| `internals/discord/wscompress.go` | `zlib-stream` decoder |
+| `internals/httpio/` | Pure `DecodeBody`; `Encode` only normalises framing |
+| `internals/tamper/` | `Tamperer` interface, `Nop`, `Logging` (default) |
+| `internals/healthz/` | Loopback `/healthz` |
+| `internals/internaltest/` | Test/bench helpers. Never import from production code |
 
-## Mental model (the part that isn't obvious from the code)
+Test support outside `proxy/`:
 
-1. **One accept loop, two arrival modes.** `MITMProxy.Serve` peeks the first
-   byte: `0x16` -> direct TLS (iptables redirect landed real bot traffic);
-   anything else -> read an HTTP request, expect `CONNECT host:port`,
-   acknowledge, then TLS-terminate. Both end up calling `handlers.HttpsHandler`
-   on a `*tls.Conn`.
+- `robojs-mock/`: a Robo.js app running `@robojs/mock`, a fake Discord
+  gateway + REST API with a control API (`/mock/api/control/...`) for
+  injecting events.
+- `testing-bot/`: a discord.js sharded bot that talks to the real Discord.
+  It reads `DISCORD_BOT_TOKEN` from the shell or the git-ignored root `.env`,
+  and is the only service that needs it.
+- `tests/stress/driver/` + `scripts/run-stress.sh` + `docker-compose.stress.yml`:
+  the load harness. It never touches the real Discord, which avoids rate
+  limits and bans:
+  - The `-tags stress` proxy resolves every Discord host to
+    `robojs-mock/tls-front.mjs`, a TLS front on :3443, because
+    `@robojs/server` is HTTP-only.
+  - The driver acts as a bot shard, with one gateway connection through
+    the proxy and one straight to the TLS front on the same mock session.
+    It injects events through the mock's control API. The per-event
+    difference between the two paths is the proxy's overhead.
+  - Output goes to `tests/stress/results/` (git-ignored): `summary.md`,
+    `latencies.csv` and `stats.csv`, plus `proxy.log` with the
+    `tamper` records.
+  - If `summary.md` shows 0 proxy `tamper` records, nothing went
+    through the proxy and the numbers are meaningless.
 
-2. **The bot's DNS is rewired, so the proxy can't reuse hostnames upstream.**
-   `dnsbypass.ExternalResolver` dials `$PROXY_DNS_SERVER` (default `8.8.8.8:53`)
-   to resolve real Discord IPs. The proxy then dials the IP but keeps
-   `ServerName: originalHost` in the upstream TLS config so SNI + cert
-   validation against Discord both work.
+## Things that aren't obvious from the code
 
-3. **`MITMProxy` is a pure listener + `Handshaker`.** Collaborators
-   (tamperer, resolver, hostnames, logger, optional `UpstreamTLSConfig` and
-   `DialUpstream` hooks) travel as `internals.HandlerDeps`, built in `main`
-   and passed through `Listen` / `Serve` to every handler invocation.
-   Handlers depend on the `Handshaker` interface, never on the concrete
-   `*MITMProxy`. `Listen` opens `net.Listen` and delegates to
-   `Serve(ctx, ln, deps, handler)`; tests call `Serve` directly with a
-   `net.Pipe`-backed listener and their own `context.Context` for graceful
-   shutdown.
+1. **One accept loop, two arrival modes.** `Serve` peeks at the first byte.
+   `0x16` means direct TLS (traffic redirected by iptables). Anything else
+   is read as an HTTP `CONNECT`. Both end in `handlers.HttpsHandler` on a
+   `*tls.Conn`.
+2. **Compressed gateway streams are observation-only.** With
+   `compress=zlib-stream`, the bot always gets the original compressed
+   frame. The Tamperer sees the decoded view, but its return value is
+   ignored. Uncompressed streams are fully bidirectional.
+3. **`Encode` doesn't re-compress.** Bodies keep Discord's
+   `Content-Encoding`. A Tamperer that rewrites a body is responsible for
+   keeping that header consistent.
+4. **Leaf certs** last 7 days and are regenerated within 24 h of expiry.
+   Issuing a new leaf is expensive (~90 ms, see `BenchmarkLeafIssue_CacheMiss`),
+   so the cache matters.
+5. **The CA key must be `0600`** or the proxy refuses to start.
 
-4. **The `Tamperer` interface is THE test seam.** Tests swap
-   `tamper.Logging`/`tamper.Nop` for a recording implementation by building
-   their own `HandlerDeps`. The interface has four methods:
-   - `Request(*http.Request) (*http.Request, error)`
-   - `Response(*http.Request, *http.Response, decodedBody []byte) (*http.Response, error)`
-   - `WSIncoming([]byte) ([]byte, error)`
-   - `WSOutgoing([]byte) ([]byte, error)`
+## Contracts and test seams
 
-5. **Compressed gateway streams are observation-only.** When
-   `compress=zlib-stream` is negotiated, `InspectWS` always forwards the
-   **original compressed frame** to the bot regardless of what the Tamperer
-   returns. The Tamperer is handed the decoded view for inspection only.
-   Uncompressed streams are fully bidirectional — Tamperer's return value
-   IS what gets forwarded.
-
-6. **`httpio.DecodeBody` is pure; `httpio.Encode` only normalises framing.**
-   `DecodeBody` returns decoded bytes for the tamperer without mutating
-   `resp` (Content-Encoding stays put). `Encode` reads the body and resets
-   `Content-Length` / drops `Transfer-Encoding` so `Response.Write`
-   produces clean framing — it does NOT re-compress. The bot gets the
-   exact bytes Discord sent, with the same Content-Encoding. A Tamperer
-   that rewrites `resp.Body` is responsible for keeping `Content-Encoding`
-   consistent with the new bytes.
-
-7. **`tamper.Logging` is the default.** `main.go` wires it as the proxy's
-   Tamperer; HTTP req/resp and WS in/out content all log at Info. The
-   chatty per-frame operational metadata in `handlers/ws.go` (one line per
-   frame including heartbeats) stays at Debug. Set `PROXY_LOG_BODIES=false`
-   to keep payload bytes out of logs while still seeing traffic volume
-   (`body_len` / `len` attributes are always emitted).
-
-8. **Cert cache renewal.** Leaf certs are issued with 7-day validity.
-   `GetOrCreateCert` checks `NotAfter` and regenerates when within 24h
-   of expiry. The CA private key file is rejected at startup if its
-   permissions allow group/other read (`certificate-manager.sh` enforces
-   `chmod 0600`).
-
-## Open follow-ups
-
-- **`ZlibStreamDecoder` race fix.** The `drain()` / `writeDone`
-  synchronisation is non-deterministic. See
-  [docs/known-issues.md](docs/known-issues.md) for the failure mode.
-- **WebSocket end-to-end test.** Only the HTTP path is exercised
-  end-to-end today; the WS upgrade path with `wsutil` frame injection is
-  a small extension on top of the existing harness.
-- **No SIGTERM handling in main.** `Serve` accepts a `context.Context`
-  but `main.Listen` passes `context.Background`. Wire
-  `signal.NotifyContext` in `main.go` for production drain.
-- **HTTP/2 upstream.** Currently locked to `http/1.1` in the upstream
-  `NextProtos`. See [docs/known-issues.md](docs/known-issues.md).
+- `Tamperer`'s four methods (`Request`, `Response`, `WSIncoming`,
+  `WSOutgoing`) are a public contract. Adding methods is fine; changing
+  signatures needs coordination.
+- `Resolver`, `Handshaker`, `HandlerDeps.UpstreamTLSConfig`,
+  `HandlerDeps.DialUpstream` and `MITMProxy.Serve` are the test seams.
+  Don't inline `net.LookupHost`, `tls.DialWithDialer` or `net.Listen` in
+  code paths that would bypass them.
 
 ## Commands
 
 ```bash
-# Generate the Root CA (one-time; idempotent, --force to regenerate)
-./certificate-manager.sh
-
-# Build + run the whole stack
-docker compose up --build hallmaster-proxy -d
-docker compose up -d                    # bots come up after proxy is healthy
-
-# Logs
+./certificate-manager.sh                       # Root CA (idempotent; --force regenerates)
+docker compose up --build -d                   # proxy + bots (bots wait for healthy proxy)
 docker compose logs -f hallmaster-proxy
 
-# Local Go workflow (from proxy/)
-go build -o hallmaster-proxy .
-go vet ./...
-go fmt ./...
+# from proxy/
+go vet ./... && go vet -tags stress ./...
 go test ./... -race -count=1
-golangci-lint run                       # uses .golangci.yml
+go test -run '^$' -bench . -benchmem ./...     # in-process microbenchmarks
+golangci-lint run && golangci-lint run --build-tags stress ./...   # v2 config; brew install golangci-lint
 
-# Test compose (uses robojs-mock + testing-bot — currently moving to own branch)
-docker compose -f docker-compose.test.yml up --build
+# once per clone (from repo root): pre-commit = secret guard + golangci-lint
+git config core.hooksPath .githooks
+
+# end-to-end load harness (from repo root)
+./scripts/run-stress.sh                        # all scenarios
+./scripts/run-stress.sh burst_10k              # one scenario
 ```
 
-## Things to know before changing code
+## Guardrails
 
-- **`Tamperer`'s four-method interface is a public contract** for the test
-  branch. Adding methods is fine; changing signatures requires
-  coordination.
-- **`Resolver`, `Handshaker`, `UpstreamTLSConfig`, `DialUpstream`,
-  `MITMProxy.Serve`** are also test seams. Don't inline `net.LookupHost`,
-  `tls.DialWithDialer`, or `net.Listen` calls in places that bypass
-  these hooks.
-- **The proxy is not designed to be reachable from outside the Docker
-  network.** Don't publish ports in the compose examples.
-- **`certs/*.pem` is a private key.** `.gitignore` covers it; double-check
-  before any `git add -A`. The proxy refuses to start if the key file is
-  more permissive than `0600`.
-- **The Hallmaster Runner base image (separate repo)** is what installs
-  the Root CA into the OS trust store and configures `iptables`. Bots that
-  don't inherit from it will mostly work via DNS aliases but will bypass
-  the proxy for any raw-IP dial.
-- **Runtime trust stores are a per-language minefield.** Node / Bun /
-  Python / Deno / Java each need their own env var (or worse). The table
-  is in [docs/known-issues.md](docs/known-issues.md). Don't promise a
-  new runtime works until you've actually verified its trust-store
-  behaviour.
-
-## Things NOT to do here
-
-- Don't add the same content to both [README.md](README.md) and `docs/*` —
-  README points, docs explain.
-- Don't introduce code for `robojs-mock/` or `testing-bot/`; they are
-  moving to their own branch.
-- Don't add `*.md` documentation files outside `docs/` unless the user
-  explicitly asks for them.
-- Don't skip pre-commit hooks (`--no-verify`) without explicit user
-  approval.
+- The proxy must not be reachable from outside the Docker network. Don't
+  publish its ports.
+- `certs/*.pem` and `.env` hold secrets. The pre-commit hook blocks
+  `.env*` (except `*.example`), `*.pem` and `*.key`, but only once
+  `core.hooksPath` is set.
+- Don't claim a new bot runtime works until you've checked how it handles
+  its trust store (see the table in `docs/known-issues.md`).
+- Don't add `*.md` files outside `docs/` unless asked.
+- Don't skip pre-commit hooks (`--no-verify`) without approval.

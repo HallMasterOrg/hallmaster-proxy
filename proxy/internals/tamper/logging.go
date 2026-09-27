@@ -24,11 +24,7 @@ const payloadPreviewLimit = 8192
 // arrive pre-decoded via the `decodedBody` argument; nil means the body was
 // empty, binary, or undecodable.
 //
-// Logger, when nil, falls back to slog.Default() — keeping the zero value
-// useful so existing code that uses `tamper.Logging{}` still compiles.
-// Production wiring in main builds it via `tamper.Logging{Logger:
-// deps.Logger, LogBodies: cfg.LogBodies}` so every log line flows through
-// the same logger that handlers and mitm use.
+// Logger is required; main passes the same logger handlers and mitm use.
 //
 // LogBodies controls whether full request/response bodies are emitted.
 // When false, only a `body_len` attribute is included so observers still
@@ -40,27 +36,17 @@ type Logging struct {
 	LogBodies bool
 }
 
-func (l Logging) log() *slog.Logger {
-	if l.Logger != nil {
-		return l.Logger
-	}
-	return slog.Default()
-}
-
 func (l Logging) Request(req *http.Request) (*http.Request, error) {
 	body, bodyLen := readAndRewindBody(req)
 	attrs := []any{"method", req.Method, "url", req.URL.String(), "proto", req.Proto, "body_len", bodyLen}
 	if l.LogBodies {
 		attrs = append(attrs, "body", preview(body))
 	}
-	l.log().Info("tamper http req", attrs...)
+	l.Logger.Info("tamper http req", attrs...)
 	return req, nil
 }
 
 func (l Logging) Response(req *http.Request, resp *http.Response, decodedBody []byte) (*http.Response, error) {
-	if resp == nil {
-		return resp, nil
-	}
 	attrs := []any{"method", req.Method, "url", req.URL.String(), "status", resp.Status, "body_len", len(decodedBody)}
 	if l.LogBodies {
 		body := "<empty>"
@@ -69,7 +55,7 @@ func (l Logging) Response(req *http.Request, resp *http.Response, decodedBody []
 		}
 		attrs = append(attrs, "body", body)
 	}
-	l.log().Info("tamper http resp", attrs...)
+	l.Logger.Info("tamper http resp", attrs...)
 	return resp, nil
 }
 
@@ -82,7 +68,7 @@ func (l Logging) WSIncoming(payload []byte) ([]byte, error) {
 	// path, so WebSocket content is part of its primary product, just
 	// like HTTP req/resp above. Per-frame operational chatter (every
 	// heartbeat ack, every fragment) stays at Debug in handlers/ws.go.
-	l.log().Info("tamper ws<-discord", attrs...)
+	l.Logger.Info("tamper ws<-discord", attrs...)
 	return payload, nil
 }
 
@@ -91,7 +77,7 @@ func (l Logging) WSOutgoing(payload []byte) ([]byte, error) {
 	if l.LogBodies {
 		attrs = append(attrs, "payload", preview(string(payload)))
 	}
-	l.log().Info("tamper ws->discord", attrs...)
+	l.Logger.Info("tamper ws->discord", attrs...)
 	return payload, nil
 }
 

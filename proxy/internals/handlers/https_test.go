@@ -23,6 +23,7 @@ import (
 	"hallmasterorg/hallmaster-proxy/internals/config"
 	"hallmasterorg/hallmaster-proxy/internals/handlers"
 	"hallmasterorg/hallmaster-proxy/internals/internaltest"
+	"hallmasterorg/hallmaster-proxy/internals/tamper"
 
 	"log/slog"
 )
@@ -85,7 +86,7 @@ func (s stubResolver) Resolve(_ context.Context, _ string) (string, error) {
 }
 
 // readPEMCert loads a PEM-encoded x509 certificate from disk.
-func readPEMCert(t *testing.T, path string) *x509.Certificate {
+func readPEMCert(t testing.TB, path string) *x509.Certificate {
 	t.Helper()
 	b, err := os.ReadFile(path)
 	if err != nil {
@@ -108,9 +109,10 @@ func readPEMCert(t *testing.T, path string) *x509.Certificate {
 //   - HandlerDeps with UpstreamTLSConfig trusting the backend.
 //   - A net.Pipe pair; one end is TLS-terminated via MITMProxy.Handshake.
 //
-// Returns the recording tamperer (for assertions), the client-side
-// *tls.Conn the test will drive, and a cleanup function.
-func buildE2EHarness(t *testing.T, backend http.Handler) (*recordingTamperer, *tls.Conn, func()) {
+// Returns the client-side *tls.Conn the test drives and a cleanup function.
+// Benchmarks use it too: HttpsHandler loops on one TLS session, so they
+// can pipeline many requests per harness to amortise the handshake.
+func buildE2EHarness(t testing.TB, backend http.Handler, tamp tamper.Tamperer) (*tls.Conn, func()) {
 	t.Helper()
 
 	// 1. Upstream CA + a leaf cert for "discord.com" so the proxy's
@@ -147,11 +149,10 @@ func buildE2EHarness(t *testing.T, backend http.Handler) (*recordingTamperer, *t
 	//    Resolver stub.
 	backendAddr := server.Listener.Addr().String()
 
-	// 5. recordingTamperer + HandlerDeps with the new upstream hooks.
-	rec := &recordingTamperer{}
+	// 5. HandlerDeps with the new upstream hooks.
 	deps := internals.HandlerDeps{
 		Cfg:               cfg,
-		Tamperer:          rec,
+		Tamperer:          tamp,
 		Resolver:          stubResolver{addr: backendAddr},
 		Handshaker:        p,
 		ProxyHostPort:     "hallmaster-proxy:443",
@@ -198,7 +199,7 @@ func buildE2EHarness(t *testing.T, backend http.Handler) (*recordingTamperer, *t
 		}
 	}
 
-	return rec, tlsClient, cleanup
+	return tlsClient, cleanup
 }
 
 func TestHttpsHandler_RequestResponseRoundTrip(t *testing.T) {
@@ -212,7 +213,8 @@ func TestHttpsHandler_RequestResponseRoundTrip(t *testing.T) {
 		_, _ = w.Write([]byte(`{"url":"wss://gateway.discord.gg"}`))
 	})
 
-	rec, tlsClient, cleanup := buildE2EHarness(t, backend)
+	rec := &recordingTamperer{}
+	tlsClient, cleanup := buildE2EHarness(t, backend, rec)
 	defer cleanup()
 
 	// Drive the request from the client side. http.Request.Write needs an
@@ -284,7 +286,8 @@ func TestHttpsHandler_GzippedUpstream(t *testing.T) {
 		_, _ = w.Write(buf.Bytes())
 	})
 
-	rec, tlsClient, cleanup := buildE2EHarness(t, backend)
+	rec := &recordingTamperer{}
+	tlsClient, cleanup := buildE2EHarness(t, backend, rec)
 	defer cleanup()
 
 	req, err := http.NewRequest("GET", "https://discord.com/api/v10/gateway/bot", nil)
@@ -314,7 +317,7 @@ func TestHttpsHandler_GzippedUpstream(t *testing.T) {
 	if err != nil {
 		t.Fatalf("gzip.NewReader: %v (this is the discord.js failure mode — Encode double-gzipped the body)", err)
 	}
-	defer gr.Close()
+	defer func() { _ = gr.Close() }()
 	decoded, err := io.ReadAll(gr)
 	if err != nil {
 		t.Fatalf("read gunzipped: %v", err)

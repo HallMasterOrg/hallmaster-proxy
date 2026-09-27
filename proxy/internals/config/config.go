@@ -3,7 +3,7 @@ package config
 import (
 	"fmt"
 	"os"
-	"strings"
+	"strconv"
 	"time"
 )
 
@@ -52,12 +52,10 @@ func Load() (*Config, error) {
 	hostname := os.Getenv("PROXY_HOSTNAME")
 	if hostname == "" {
 		// Fall back to the system hostname (Docker injects this).
-		if h, err := os.Hostname(); err == nil {
-			hostname = h
+		var err error
+		if hostname, err = os.Hostname(); err != nil {
+			return nil, fmt.Errorf("PROXY_HOSTNAME unset and os.Hostname failed: %w", err)
 		}
-	}
-	if hostname == "" {
-		return nil, fmt.Errorf("PROXY_HOSTNAME is required")
 	}
 
 	port := getenvDefault("PROXY_PORT", "8080")
@@ -85,18 +83,13 @@ func Load() (*Config, error) {
 	}, nil
 }
 
-// getenvBoolDefault returns the boolean value of `key` if it is set to one
-// of "1", "true", "yes", "on" (case-insensitive); the inverse strings turn
-// it off. Anything else (or unset) returns `def`.
+// getenvBoolDefault parses `key` with strconv.ParseBool (1/t/true/0/f/false,
+// any case); unset or unparseable returns `def`.
 func getenvBoolDefault(key string, def bool) bool {
-	switch strings.ToLower(os.Getenv(key)) {
-	case "1", "true", "yes", "on":
-		return true
-	case "0", "false", "no", "off":
-		return false
-	default:
-		return def
+	if v, err := strconv.ParseBool(os.Getenv(key)); err == nil {
+		return v
 	}
+	return def
 }
 
 func getenvDefault(key, def string) string {

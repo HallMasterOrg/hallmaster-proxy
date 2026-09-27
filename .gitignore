@@ -42,3 +42,7 @@ docker-compose.yml
 *.crt
 proxy/hallmaster-proxy
 .claude
+
+# Stress harness: compiled driver + run output
+tests/stress/driver/driver
+tests/stress/results/

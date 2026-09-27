@@ -11,17 +11,12 @@ import (
 // failures are fatal because a missing healthcheck would make the
 // container appear permanently unhealthy.
 //
-// The response is 200 OK when `ready` is nil or returns true; otherwise
-// 503 Service Unavailable. `logger` receives lifecycle and failure logs;
-// pass nil to use slog.Default().
+// The response is 200 OK when `ready` returns true, otherwise 503 Service
+// Unavailable.
 func ListenAndServe(port string, logger *slog.Logger, ready func() bool) {
-	if logger == nil {
-		logger = slog.Default()
-	}
-
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
-		if ready != nil && !ready() {
+		if !ready() {
 			w.WriteHeader(http.StatusServiceUnavailable)
 			_, _ = w.Write([]byte("not ready\n"))
 			return

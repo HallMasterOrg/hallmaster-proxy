@@ -22,9 +22,6 @@ import (
 // serverNameFromHost strips an optional :port suffix so a hostname can be
 // used as the Common Name of a leaf certificate.
 func serverNameFromHost(hostname string) string {
-	if !strings.Contains(hostname, ":") {
-		return hostname
-	}
 	if host, _, err := net.SplitHostPort(hostname); err == nil {
 		return host
 	}

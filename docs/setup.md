@@ -200,7 +200,20 @@ Useful while developing:
   graceful-shutdown tests (`mitm_test.go`).
 - `golangci-lint run` — full lint per the config in `.golangci.yml`
   (`errcheck`, `govet`, `ineffassign`, `staticcheck`, `unused`, `gofmt`,
-  `goimports`).
+  `goimports`). The config uses the v2 format, so it needs golangci-lint 2.x
+  (`brew install golangci-lint`).
+
+Enable the pre-commit hook once per clone:
+
+```bash
+git config core.hooksPath .githooks
+```
+
+[.githooks/pre-commit](../.githooks/pre-commit) refuses to commit
+`.env` / `.env.*` (except `*.example`), `*.pem` and `*.key` (removing them from the index still
+works). When Go files are staged, it also runs `golangci-lint` on the proxy
+(default and `stress` build tags) and on the stress driver. It lints the
+working tree, not just the staged changes.
 
 When you change the Go code, rebuild the container with:
 

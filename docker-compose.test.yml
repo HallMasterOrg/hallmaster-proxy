@@ -11,7 +11,8 @@ services:
     environment:
       - NODE_ENV=production
       - NODE_OPTIONS=--enable-source-maps
-      - DISCORD_TOKEN=""
+      - ROBO_MOCK_MODE=true
+      - ROBO_MOCK_SESSION_ID=sess_rgrxeOVvFaeLgJBe
     volumes:
       - flashcore-data:/app/.robo/flashcore
 
@@ -41,10 +42,11 @@ services:
           - discord.gg
           - gateway.discord.gg
     healthcheck:
-      test: [ "CMD", "ping", "127.0.0.1:$$PROXY_HTTP_PORT" ]
-      interval: 1m30s
-      timeout: 30s
+      test: [ "CMD-SHELL", "wget -q --spider http://127.0.0.1:$${PROXY_HEALTH_PORT}/healthz || exit 1" ]
+      interval: 10s
+      timeout: 5s
       retries: 5
+      start_period: 10s
 
   discord-bot:
     depends_on:
@@ -53,9 +55,12 @@ services:
     build:
       context: ./testing-bot
       dockerfile: Dockerfile
-    env_file:
-      - .env.test
     environment:
+      # Talks to the real Discord, so it needs a real token: taken from the
+      # shell or the git-ignored root .env. Unset only breaks this service.
+      DISCORD_BOT_TOKEN: ${DISCORD_BOT_TOKEN:-}
+      TOTAL_SHARDS: 2
+      SHARD_ID_LIST: "0,1"
       NODE_EXTRA_CA_CERTS: /usr/local/share/ca-certificates/hallmaster-root-ca.crt
       NODE_USE_ENV_PROXY: "1"
     restart: "no"

@@ -1,6 +1,12 @@
 # syntax=docker/dockerfile:1.7
 FROM golang:1.23.2-alpine3.20 AS builder
 
+# BUILD_TAGS, when set, is forwarded to `go build` via -tags. The stress
+# harness in docker-compose.stress.yml passes "stress" so the resulting
+# image points upstream at robojs-mock instead of Discord. Empty (the
+# default) produces a normal production binary.
+ARG BUILD_TAGS=""
+
 WORKDIR /app
 
 COPY go.mod go.sum ./
@@ -12,7 +18,7 @@ COPY . .
 
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
-    CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /out/proxy .
+    CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -tags "${BUILD_TAGS}" -o /out/proxy .
 
 FROM alpine:3.20
 

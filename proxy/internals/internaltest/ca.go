@@ -20,8 +20,9 @@ import (
 // WriteTestCA generates a fresh in-memory Root CA, writes the cert and
 // key to a temp dir, and returns the on-disk paths suitable for
 // certs.New(). Mode is 0600 so the post-Phase-3 permission check
-// accepts it.
-func WriteTestCA(t *testing.T) (certPath, keyPath string) {
+// accepts it. Accepts testing.TB so both *testing.T and *testing.B
+// callers can use it.
+func WriteTestCA(t testing.TB) (certPath, keyPath string) {
 	t.Helper()
 	dir := t.TempDir()
 
@@ -60,7 +61,7 @@ func WriteTestCA(t *testing.T) (certPath, keyPath string) {
 // served by an httptest server (via Config.Certificates), and the CA's
 // public certificate as a *x509.Certificate so callers can build a trust
 // pool to hand to the proxy.
-func IssueLeaf(t *testing.T, caCertPath, caKeyPath string, dnsNames []string) (tls.Certificate, *x509.Certificate) {
+func IssueLeaf(t testing.TB, caCertPath, caKeyPath string, dnsNames []string) (tls.Certificate, *x509.Certificate) {
 	t.Helper()
 
 	caCertPEM, err := os.ReadFile(caCertPath)

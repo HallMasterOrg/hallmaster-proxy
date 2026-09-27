@@ -46,8 +46,8 @@ func TestDecodeBody_Identity(t *testing.T) {
 func TestDecodeBody_Gzip(t *testing.T) {
 	var buf bytes.Buffer
 	w := gzip.NewWriter(&buf)
-	w.Write([]byte("gzipped payload"))
-	w.Close()
+	_, _ = w.Write([]byte("gzipped payload"))
+	_ = w.Close()
 
 	resp := mkResp("gzip", "application/json", buf.Bytes())
 	got, err := DecodeBody(resp)
@@ -72,8 +72,8 @@ func TestDecodeBody_Gzip(t *testing.T) {
 func TestDecodeBody_Deflate(t *testing.T) {
 	var buf bytes.Buffer
 	w := zlib.NewWriter(&buf)
-	w.Write([]byte("deflate payload"))
-	w.Close()
+	_, _ = w.Write([]byte("deflate payload"))
+	_ = w.Close()
 
 	resp := mkResp("deflate", "application/json", buf.Bytes())
 	got, err := DecodeBody(resp)
@@ -91,8 +91,8 @@ func TestDecodeBody_Deflate(t *testing.T) {
 func TestDecodeBody_Br(t *testing.T) {
 	var buf bytes.Buffer
 	w := brotli.NewWriter(&buf)
-	w.Write([]byte("brotli payload"))
-	w.Close()
+	_, _ = w.Write([]byte("brotli payload"))
+	_ = w.Close()
 
 	resp := mkResp("br", "application/json", buf.Bytes())
 	got, err := DecodeBody(resp)
@@ -165,8 +165,8 @@ func TestDecodeBody_LongPayloadRoundTrip(t *testing.T) {
 	payload := strings.Repeat("abcdefghij", 10_000)
 	var buf bytes.Buffer
 	w := gzip.NewWriter(&buf)
-	w.Write([]byte(payload))
-	w.Close()
+	_, _ = w.Write([]byte(payload))
+	_ = w.Close()
 
 	resp := mkResp("gzip", "application/json", buf.Bytes())
 	got, err := DecodeBody(resp)

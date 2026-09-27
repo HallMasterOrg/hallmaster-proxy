@@ -34,7 +34,7 @@ func newDNSStub(t *testing.T, answer net.IP) *dnsStub {
 }
 
 func (s *dnsStub) Close() {
-	s.conn.Close()
+	_ = s.conn.Close()
 	s.wg.Wait()
 }
 

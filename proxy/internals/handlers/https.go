@@ -16,7 +16,7 @@ import (
 
 const maxConnectDepth = 4
 
-var discordHostSuffixes = []string{"discord.com", "discord.gg", "gateway.discord.gg"}
+var discordHostSuffixes = []string{"discord.com", "discord.gg"}
 
 // isDiscordHost reports whether `hostHeader` (an HTTP Host header, possibly
 // "host:port") points at one of the Discord hostnames the proxy is meant to
@@ -59,12 +59,6 @@ func HttpsHandler(deps internals.HandlerDeps, clientTLS *tls.Conn) {
 		}
 	}()
 
-	cfg := deps.Cfg
-	tamperer := deps.Tamperer
-	resolver := deps.Resolver
-	proxyHostPort := deps.ProxyHostPort
-	cleanProxyHost := deps.CleanHostname
-
 	for {
 		req, err := http.ReadRequest(clientReader)
 		if err != nil {
@@ -74,7 +68,7 @@ func HttpsHandler(deps internals.HandlerDeps, clientTLS *tls.Conn) {
 			return
 		}
 
-		isRelay := req.Host == proxyHostPort || req.Host == cleanProxyHost
+		isRelay := req.Host == deps.ProxyHostPort || req.Host == deps.CleanHostname
 		shouldIntercept := isRelay || isDiscordHost(req.Host)
 
 		if req.Method == http.MethodConnect {
@@ -108,8 +102,8 @@ func HttpsHandler(deps internals.HandlerDeps, clientTLS *tls.Conn) {
 		originalHost := req.Host
 		targetHost := originalHost
 		if isDiscordHost(targetHost) {
-			ctx, cancel := context.WithTimeout(req.Context(), cfg.DNSTimeout)
-			realAddr, err := resolver.Resolve(ctx, targetHost)
+			ctx, cancel := context.WithTimeout(req.Context(), deps.Cfg.DNSTimeout)
+			realAddr, err := deps.Resolver.Resolve(ctx, targetHost)
 			cancel()
 			if err == nil {
 				logger.Debug("dns bypass redirect", "host", targetHost, "addr", realAddr)
@@ -137,11 +131,11 @@ func HttpsHandler(deps internals.HandlerDeps, clientTLS *tls.Conn) {
 			upstreamCfg.ServerName = originalHost
 			upstreamCfg.NextProtos = []string{"http/1.1"}
 
-			dialCtx, dialCancel := context.WithTimeout(req.Context(), cfg.UpstreamDialTimeout)
+			dialCtx, dialCancel := context.WithTimeout(req.Context(), deps.Cfg.UpstreamDialTimeout)
 			if deps.DialUpstream != nil {
 				serverTLS, err = deps.DialUpstream(dialCtx, "tcp", targetHost, upstreamCfg)
 			} else {
-				dialer := &net.Dialer{Timeout: cfg.UpstreamDialTimeout}
+				dialer := &net.Dialer{Timeout: deps.Cfg.UpstreamDialTimeout}
 				serverTLS, err = tls.DialWithDialer(dialer, "tcp", targetHost, upstreamCfg)
 			}
 			dialCancel()
@@ -184,7 +178,7 @@ func HttpsHandler(deps internals.HandlerDeps, clientTLS *tls.Conn) {
 		logger.Debug("http req", "method", req.Method, "url", req.URL.String())
 
 		finalRequest := req
-		if tampered, err := tamperer.Request(req); err != nil {
+		if tampered, err := deps.Tamperer.Request(req); err != nil {
 			logger.Warn("tamper request", "err", err)
 		} else {
 			finalRequest = tampered
@@ -211,13 +205,17 @@ func HttpsHandler(deps internals.HandlerDeps, clientTLS *tls.Conn) {
 
 		if isWebsocketUpgrade(finalRequest) && resp.StatusCode == http.StatusSwitchingProtocols {
 			logger.Info("ws upgrade", "host", targetHost)
-			resp.Write(clientTLS)
+			err := resp.Write(clientTLS)
 			closeResp()
+			if err != nil {
+				logger.Error("write ws upgrade to client", "err", err)
+				return
+			}
 			isCompressed := strings.Contains(finalRequest.URL.RawQuery, "compress=zlib-stream")
 			if isCompressed {
 				logger.Info("ws zlib-stream compression", "host", finalRequest.Host)
 			}
-			InspectWS(logger, clientTLS, clientReader, serverTLS, serverReader, proxyHostPort, isCompressed, tamperer)
+			InspectWS(logger, clientTLS, clientReader, serverTLS, serverReader, deps.ProxyHostPort, isCompressed, deps.Tamperer)
 			return
 		}
 
@@ -227,13 +225,19 @@ func HttpsHandler(deps internals.HandlerDeps, clientTLS *tls.Conn) {
 		}
 
 		finalResponse := resp
-		if tampered, err := tamperer.Response(finalRequest, resp, decodedBody); err != nil {
+		if tampered, err := deps.Tamperer.Response(finalRequest, resp, decodedBody); err != nil {
 			logger.Warn("tamper response", "err", err)
 		} else {
 			finalResponse = tampered
 		}
 
-		httpio.Encode(finalResponse)
+		// A failed body read leaves the response truncated; drop the
+		// connection rather than hand the bot a short body.
+		if err := httpio.Encode(finalResponse); err != nil {
+			logger.Error("read response body from upstream", "err", err)
+			closeResp()
+			return
+		}
 		if err = finalResponse.Write(clientTLS); err != nil {
 			logger.Error("write response to client", "err", err)
 			closeResp()

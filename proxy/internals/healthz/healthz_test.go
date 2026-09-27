@@ -63,17 +63,6 @@ func TestHealthz_NotReadyReturns503(t *testing.T) {
 	}
 }
 
-func TestHealthz_NilReadyReturns200(t *testing.T) {
-	port := pickFreePort(t)
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-
-	ListenAndServe(port, logger, nil)
-
-	if got := waitForHealthz(t, port, 2*time.Second); got != 200 {
-		t.Errorf("status with nil ready: got %d want 200", got)
-	}
-}
-
 func TestHealthz_ReadyTransitions(t *testing.T) {
 	port := pickFreePort(t)
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))

@@ -1,0 +1,45 @@
+# Stress-build compose: overlays docker-compose.test.yml so that
+#
+#   1. The proxy is built with `-tags stress`: every Discord host resolves to robojs-mock's TLS front — load
+#      never reaches the real Discord.
+#   2. robojs-mock also runs tls-front.mjs (TLS :3443 -> plain :3000),
+#      because @robojs/server is HTTP-only and the proxy dials TLS upstream.
+#   3. stress-driver plays a bot shard through the proxy and, side by
+#      side, directly against the TLS front. The difference is the proxy.
+#
+# Use scripts/run-stress.sh rather than invoking this directly.
+
+services:
+  hallmaster-robojs-mock:
+    command: [ "sh", "-c", "node tls-front.mjs & exec npx robo mock start --port 3000" ]
+
+  hallmaster-proxy:
+    build:
+      args:
+        BUILD_TAGS: "stress"
+    environment:
+      STRESS_UPSTREAM_ADDR: "hallmaster-robojs-mock:3443"
+      PROXY_LOG_BODIES: "false"
+      # Unset: tamper.Logging (one line per request/frame). nop: no logging.
+      STRESS_TAMPERER: "${STRESS_TAMPERER:-}"
+
+  stress-driver:
+    depends_on:
+      hallmaster-proxy:
+        condition: service_healthy
+      hallmaster-robojs-mock:
+        condition: service_started
+    build:
+      context: ./tests/stress/driver
+      dockerfile: Dockerfile
+    container_name: hallmaster-stress-driver
+    volumes:
+      # docker exec / docker logs against the proxy container for
+      # stats.csv and proxy.log.
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./tests/stress/results:/results
+      - ./certs/hallmaster-rootca.crt:/ca.crt:ro
+    networks:
+      - hallmaster-proxy-net
+    # run-stress.sh passes the scenario name.
+    command: [ "idle" ]

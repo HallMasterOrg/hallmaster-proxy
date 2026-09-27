@@ -116,11 +116,3 @@ func TestLogging_WSFramesAtInfo(t *testing.T) {
 		}
 	}
 }
-
-func TestLogging_NilLoggerFallsBackToDefault(t *testing.T) {
-	// The zero value should not panic; it should resolve to slog.Default().
-	l := Logging{}
-	if _, err := l.WSIncoming([]byte("ping")); err != nil {
-		t.Fatalf("WSIncoming: %v", err)
-	}
-}

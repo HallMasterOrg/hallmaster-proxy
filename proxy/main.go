@@ -12,6 +12,10 @@ import (
 	"os"
 )
 
+// stressOverrides is set by main_stress.go when built with `-tags stress`.
+// It swaps in the measurement Tamperer and points upstream at robojs-mock.
+var stressOverrides func(*internals.HandlerDeps)
+
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
 		Level: slog.LevelInfo,
@@ -43,6 +47,9 @@ func main() {
 		ProxyHostPort: cfg.Hostname + ":" + cfg.Port,
 		CleanHostname: cfg.Hostname,
 		Logger:        logger,
+	}
+	if stressOverrides != nil {
+		stressOverrides(&deps)
 	}
 	p.Listen(deps, handlers.HttpsHandler)
 }

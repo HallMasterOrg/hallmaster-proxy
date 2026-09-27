@@ -146,17 +146,13 @@ func (p *MITMProxy) handleHTTPConn(deps HandlerDeps, client net.Conn, handler fu
 		return
 	}
 	if req.Method == http.MethodConnect {
-		p.handleConnect(deps, bConn, req.Host, handler)
+		fmt.Fprintf(bConn, "HTTP/1.1 200 Connection established\r\n\r\n")
+		p.handleDirectTLS(deps, bConn, req.Host, handler)
 		return
 	}
 
 	deps.Logger.Warn("refusing non-TLS/non-CONNECT request",
 		"remote", client.RemoteAddr().String(), "method", req.Method, "host", req.Host)
-}
-
-func (p *MITMProxy) handleConnect(deps HandlerDeps, bConn net.Conn, hostname string, handler func(deps HandlerDeps, client *tls.Conn)) {
-	fmt.Fprintf(bConn, "HTTP/1.1 200 Connection established\r\n\r\n")
-	p.handleDirectTLS(deps, bConn, hostname, handler)
 }
 
 // Handshake terminates TLS for a single CONNECT'd or directly-dialled

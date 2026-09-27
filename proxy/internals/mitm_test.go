@@ -80,20 +80,6 @@ func newTestDeps() internals.HandlerDeps {
 	}
 }
 
-// noopHandler counts invocations so tests can assert the dispatch loop
-// fired.
-type noopHandler struct {
-	mu    sync.Mutex
-	calls int
-}
-
-func (h *noopHandler) handle(_ internals.HandlerDeps, c *tls.Conn) {
-	h.mu.Lock()
-	h.calls++
-	h.mu.Unlock()
-	_ = c.Close()
-}
-
 func TestServe_GracefulShutdown(t *testing.T) {
 	p := newTestProxy(t)
 	deps := newTestDeps()

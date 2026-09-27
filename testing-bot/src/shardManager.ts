@@ -3,7 +3,7 @@ import { ShardingManager } from 'discord.js';
 
 const DISCORD_BOT_TOKEN = process.env.DISCORD_BOT_TOKEN;
 
-if (undefined === DISCORD_BOT_TOKEN) {
+if (!DISCORD_BOT_TOKEN) {
   throw new Error(`No Discord bot token found in environment variables.`);
 }
 
