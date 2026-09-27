@@ -19,8 +19,5 @@ if ! command -v golangci-lint >/dev/null 2>&1; then
   exit 1
 fi
 
-root=$(git rev-parse --show-toplevel)
-cfg="$root/proxy/.golangci.yml"
 # Lints the working tree, not just the staged content.
-(cd "$root/proxy" && golangci-lint run ./... && golangci-lint run --build-tags stress ./...)
-(cd "$root/tests/stress/driver" && golangci-lint run --config "$cfg" ./...)
+exec "$(git rev-parse --show-toplevel)/scripts/lint.sh"

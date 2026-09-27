@@ -146,9 +146,9 @@ docker compose logs -f hallmaster-proxy
 go vet ./... && go vet -tags stress ./...
 go test ./... -race -count=1
 go test -run '^$' -bench . -benchmem ./...     # in-process microbenchmarks
-golangci-lint run && golangci-lint run --build-tags stress ./...   # v2 config; brew install golangci-lint
+../scripts/lint.sh                             # golangci-lint v2, all tags + stress driver; quiet on success
 
-# once per clone (from repo root): pre-commit = secret guard + golangci-lint
+# once per clone (from repo root): pre-commit = secret guard + scripts/lint.sh
 git config core.hooksPath .githooks
 
 # end-to-end load harness (from repo root)
