@@ -198,10 +198,11 @@ Useful while developing:
 - `go test ./... -race -count=1` — run the full test suite, including the
   end-to-end handler harness (`handlers/https_test.go`) and the `Serve`
   graceful-shutdown tests (`mitm_test.go`).
-- `golangci-lint run` — full lint per the config in `.golangci.yml`
+- `../scripts/lint.sh` — full lint per the config in `.golangci.yml`
   (`errcheck`, `govet`, `ineffassign`, `staticcheck`, `unused`, `gofmt`,
-  `goimports`). The config uses the v2 format, so it needs golangci-lint 2.x
-  (`brew install golangci-lint`).
+  `goimports`) over the proxy (default and `stress` build tags) and the
+  stress driver. Prints one line on success. The config uses the v2 format,
+  so it needs golangci-lint 2.x (`brew install golangci-lint`).
 
 Enable the pre-commit hook once per clone:
 
@@ -211,9 +212,14 @@ git config core.hooksPath .githooks
 
 [.githooks/pre-commit](../.githooks/pre-commit) refuses to commit
 `.env` / `.env.*` (except `*.example`), `*.pem` and `*.key` (removing them from the index still
-works). When Go files are staged, it also runs `golangci-lint` on the proxy
-(default and `stress` build tags) and on the stress driver. It lints the
-working tree, not just the staged changes.
+works). When Go files are staged, it also runs `scripts/lint.sh`. It lints
+the working tree, not just the staged changes.
+
+CI ([.github/workflows/ci.yml](../.github/workflows/ci.yml)) runs the same
+lint script and the race tests on every PR and push to `main`, then builds
+the proxy image with a GitHub Actions layer cache. Only pushes to `main`
+publish it, to `ghcr.io/hallmasterorg/hallmaster-proxy` (`latest` and
+`sha-<short>`), with a signed build-provenance attestation.
 
 When you change the Go code, rebuild the container with:
 
